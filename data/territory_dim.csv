@@ -1,0 +1,4 @@
+territory_id,name,geo_type,parent_territory_id
+1,Territory 1,State Cluster,
+2,Territory 2,State Cluster,
+3,Territory 3,Metro Area,

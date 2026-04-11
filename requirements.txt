@@ -1,0 +1,9 @@
+duckdb
+python-dotenv
+numpy
+pandas
+openai>=1.0.0
+anthropic>=0.18.0
+fastapi
+uvicorn[standard]
+supabase>=2.0.0

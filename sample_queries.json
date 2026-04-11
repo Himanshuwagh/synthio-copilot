@@ -1,0 +1,314 @@
+{
+  "meta": {
+    "description": "Sample user questions to exercise the pharma co-pilot (planner → SQL → synthesizer). Use for manual REPL testing or automated checks against gold_sql.",
+    "data_snapshot_notes": [
+      "Ground-truth SQL targets the bundled CSVs under data/ as loaded by db.py.",
+      "Territory ids: 1–3. rep_hcp_monthly / hcp_rx_monthly max month in this snapshot is 2025-12.",
+      "If you change seed data, re-run the gold_sql statements in DuckDB and update expect values."
+    ]
+  },
+  "cases": [
+    {
+      "id": "rep-1-scheduled-count",
+      "tags": ["fact_rep_activity", "filter", "simple"],
+      "question": "How many scheduled meetings does rep 1 have?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM fact_rep_activity WHERE rep_id = 1 AND status = 'scheduled'",
+      "expect": { "kind": "scalar", "column": "v", "equals": 97 }
+    },
+    {
+      "id": "tier-a-hcp-count",
+      "tags": ["hcp_dim", "simple"],
+      "question": "How many Tier A HCPs are in the database?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM hcp_dim WHERE tier = 'A'",
+      "expect": { "kind": "scalar", "column": "v", "equals": 26 }
+    },
+    {
+      "id": "territory-1-hcp-count",
+      "tags": ["hcp_dim", "territory", "simple"],
+      "question": "How many HCPs are in territory 1?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM hcp_dim WHERE territory_id = 1",
+      "expect": { "kind": "scalar", "column": "v", "equals": 30 }
+    },
+    {
+      "id": "cancelled-activities-total",
+      "tags": ["fact_rep_activity", "simple"],
+      "question": "What is the total number of cancelled rep activities?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM fact_rep_activity WHERE status = 'cancelled'",
+      "expect": { "kind": "scalar", "column": "v", "equals": 305 }
+    },
+    {
+      "id": "lunch-meetings-total",
+      "tags": ["fact_rep_activity", "activity_type", "simple"],
+      "question": "How many lunch meetings are recorded in fact rep activity?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM fact_rep_activity WHERE activity_type = 'lunch_meeting'",
+      "expect": { "kind": "scalar", "column": "v", "equals": 1448 }
+    },
+    {
+      "id": "top-rep-completed-visits",
+      "tags": ["fact_rep_activity", "ranking", "simple"],
+      "question": "Which rep has the most completed visits, and how many?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT r.first_name || ' ' || r.last_name AS rep_name, COUNT(*) AS v FROM fact_rep_activity fa JOIN rep_dim r ON fa.rep_id = r.rep_id WHERE fa.status = 'completed' GROUP BY 1 ORDER BY v DESC LIMIT 1",
+      "expect": { "kind": "row", "columns": ["rep_name", "v"], "equals": ["River White", 216] }
+    },
+    {
+      "id": "top-hcp-trx-all-time",
+      "tags": ["hcp_rx_monthly", "ranking", "simple"],
+      "question": "Who is the top HCP by total TRx across all months?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT hcp_name, SUM(trx_cnt) AS v FROM hcp_rx_monthly GROUP BY 1 ORDER BY v DESC LIMIT 1",
+      "expect": { "kind": "row", "columns": ["hcp_name", "v"], "equals": ["Dr Blake Garcia", 374] }
+    },
+    {
+      "id": "account-count",
+      "tags": ["account_dim", "simple"],
+      "question": "How many accounts are there?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM account_dim",
+      "expect": { "kind": "scalar", "column": "v", "equals": 24 }
+    },
+    {
+      "id": "territory-count",
+      "tags": ["territory_dim", "simple"],
+      "question": "How many territories are defined?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM territory_dim",
+      "expect": { "kind": "scalar", "column": "v", "equals": 3 }
+    },
+    {
+      "id": "rep-count",
+      "tags": ["rep_dim", "simple"],
+      "question": "How many sales reps are in rep_dim?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM rep_dim",
+      "expect": { "kind": "scalar", "column": "v", "equals": 9 }
+    },
+    {
+      "id": "visits-to-taylor-davis",
+      "tags": ["fact_rep_activity", "hcp_name", "simple"],
+      "question": "How many rep activities are logged for Dr. Taylor Davis?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM fact_rep_activity fa JOIN hcp_dim h ON fa.hcp_id = h.hcp_id WHERE h.full_name = 'Dr Taylor Davis'",
+      "expect": { "kind": "scalar", "column": "v", "equals": 39 }
+    },
+    {
+      "id": "brand-codes-distinct",
+      "tags": ["fact_rx", "simple"],
+      "question": "What distinct brand codes appear in prescription data?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT LIST(DISTINCT brand_code ORDER BY brand_code) AS brands FROM fact_rx",
+      "expect": { "kind": "scalar", "column": "brands", "equals": ["GAZYVA"] }
+    },
+    {
+      "id": "morgan-chen-scheduled-via-name",
+      "tags": ["rep_dim", "join", "simple"],
+      "question": "How many scheduled activities does Morgan Chen have?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM fact_rep_activity fa JOIN rep_dim r ON fa.rep_id = r.rep_id WHERE r.first_name = 'Morgan' AND r.last_name = 'Chen' AND fa.status = 'scheduled'",
+      "expect": { "kind": "scalar", "column": "v", "equals": 97 }
+    },
+    {
+      "id": "month-highest-completed-visits",
+      "tags": ["rep_hcp_monthly", "time", "ranking", "simple"],
+      "question": "Which month in rep_hcp_monthly has the highest total completed_visits, and what is that total?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT month AS m, SUM(completed_visits) AS v FROM rep_hcp_monthly GROUP BY 1 ORDER BY v DESC LIMIT 1",
+      "expect": { "kind": "row", "columns": ["m", "v"], "equals": ["2025-07", 168] }
+    },
+    {
+      "id": "visit-brief-taylor-davis",
+      "tags": ["multi_step", "synthesis", "no_automatic_gold"],
+      "question": "Prepare a short visit brief for Dr. Taylor Davis including recent visit activity and Rx trend over the last 6 months.",
+      "expected_steps": "multi",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Answer should reference Dr Taylor Davis (nephrology, Tier A, territory 1).",
+        "Should combine activity and prescription themes; numbers need not match a single SQL row."
+      ]
+    },
+    {
+      "id": "tier-a-priority-reps",
+      "tags": ["multi_step", "ranking", "no_automatic_gold"],
+      "question": "Which reps look most overdue on visiting Tier A doctors in territory 2? Give a prioritized list with reasoning.",
+      "expected_steps": "multi",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Should use Tier A and territory 2 constraints.",
+        "Ranking may use last visit dates or volumes; judge consistency with retrieved data."
+      ]
+    },
+    {
+      "id": "payor-mix-account",
+      "tags": ["fact_payor_mix", "account_dim", "simple"],
+      "question": "Show payor mix percentages for one hospital account with the most fact_payor_mix rows.",
+      "expected_steps": "single",
+      "gold_sql": "WITH top_acc AS (SELECT account_id FROM fact_payor_mix GROUP BY 1 ORDER BY COUNT(*) DESC LIMIT 1) SELECT a.name, pm.payor_type, pm.pct_mix FROM fact_payor_mix pm JOIN account_dim a ON pm.account_id = a.account_id WHERE pm.account_id = (SELECT account_id FROM top_acc) ORDER BY pm.pct_mix DESC",
+      "expect": null,
+      "manual_checks": [
+        "Run gold_sql locally; co-pilot should report the same account and payor mix rows (or equivalent aggregates)."
+      ]
+    },
+    {
+      "id": "ln-metrics-exists",
+      "tags": ["fact_ln_metrics", "simple"],
+      "question": "How many rows are in the LN metrics fact table?",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM fact_ln_metrics",
+      "expect": { "kind": "scalar", "column": "v", "equals": 570 }
+    },
+    {
+      "id": "ambiguous-friendly",
+      "tags": ["edge", "clarification"],
+      "question": "How are we doing on visits?",
+      "expected_steps": "single_or_multi",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Co-pilot should define scope (which rep/territory/time) or pick a reasonable default and state it."
+      ]
+    },
+
+    {
+      "id": "followup-elaborate",
+      "tags": ["follow_up", "reuse_data"],
+      "question": "elaborate",
+      "depends_on": "ambiguous-friendly",
+      "expected_intent": "REUSE_DATA",
+      "expected_steps": "follow_up",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Should NOT ask 'elaborate on what?'.",
+        "Intent classifier → REUSE_DATA (same data, richer presentation).",
+        "Should expand on the completed/scheduled/cancelled counts from the previous answer."
+      ]
+    },
+    {
+      "id": "followup-break-down-by-rep",
+      "tags": ["follow_up", "new_data", "rewrite"],
+      "question": "break that down by rep",
+      "depends_on": "ambiguous-friendly",
+      "expected_intent": "NEW_DATA",
+      "expected_steps": "single",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Intent classifier → NEW_DATA (adds a new GROUP BY dimension).",
+        "Rewriter → 'Show completed, scheduled, and cancelled visit counts broken down by rep'.",
+        "Result should include per-rep rows, not a single aggregate."
+      ]
+    },
+    {
+      "id": "followup-what-about-territory-2",
+      "tags": ["follow_up", "new_data", "scope_shift"],
+      "question": "what about territory 2?",
+      "depends_on": "ambiguous-friendly",
+      "expected_intent": "NEW_DATA",
+      "expected_steps": "single",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Intent classifier → NEW_DATA (filter changed to territory 2).",
+        "Rewriter → 'How are visits going in territory 2?'.",
+        "Should return data scoped to territory_id = 2 only."
+      ]
+    },
+    {
+      "id": "followup-what-about-rep-2",
+      "tags": ["follow_up", "new_data", "scope_shift"],
+      "question": "what about rep 2?",
+      "depends_on": "rep-1-scheduled-count",
+      "expected_intent": "NEW_DATA",
+      "expected_steps": "single",
+      "gold_sql": "SELECT COUNT(*) AS v FROM fact_rep_activity WHERE rep_id = 2 AND status = 'scheduled'",
+      "expect": null,
+      "manual_checks": [
+        "Intent classifier → NEW_DATA (filter changed from rep 1 to rep 2).",
+        "Rewriter → 'How many scheduled meetings does rep 2 have?'.",
+        "Must run fresh SQL with rep_id = 2, NOT reuse rep 1's cached result."
+      ]
+    },
+    {
+      "id": "followup-why",
+      "tags": ["follow_up", "reuse_data"],
+      "question": "why?",
+      "depends_on": "top-rep-completed-visits",
+      "expected_intent": "REUSE_DATA",
+      "expected_steps": "follow_up",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Intent classifier → REUSE_DATA (reasoning about the same data).",
+        "Should interpret as 'Why does River White have the most completed visits?'.",
+        "Should provide analysis using cached data."
+      ]
+    },
+    {
+      "id": "followup-compare-with-others",
+      "tags": ["follow_up", "new_data", "rewrite"],
+      "question": "how does that compare with the other reps?",
+      "depends_on": "top-rep-completed-visits",
+      "expected_intent": "NEW_DATA",
+      "expected_steps": "single",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Intent classifier → NEW_DATA (needs data for all reps, not just the top one).",
+        "Rewriter → 'Compare completed visit counts across all reps'.",
+        "Should return a table/list of all reps with their completed visit counts."
+      ]
+    },
+    {
+      "id": "followup-more-detail-rx",
+      "tags": ["follow_up", "reuse_data"],
+      "question": "tell me more",
+      "depends_on": "top-hcp-trx-all-time",
+      "expected_intent": "REUSE_DATA",
+      "expected_steps": "follow_up",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Intent classifier → REUSE_DATA.",
+        "Should elaborate on Dr Blake Garcia's TRx data.",
+        "Should NOT ask 'tell you more about what?'."
+      ]
+    },
+    {
+      "id": "followup-last-6-months",
+      "tags": ["follow_up", "new_data", "time_scoping"],
+      "question": "show me the last 6 months trend",
+      "depends_on": "top-hcp-trx-all-time",
+      "expected_intent": "NEW_DATA",
+      "expected_steps": "single",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Intent classifier → NEW_DATA (needs time-series data not in the original query).",
+        "Rewriter → 'Show Dr Blake Garcia TRx trend for the last 6 months'.",
+        "Should return monthly TRx data for Dr Blake Garcia."
+      ]
+    },
+    {
+      "id": "followup-and-for-nrx",
+      "tags": ["follow_up", "new_data", "metric_shift"],
+      "question": "and for NRx?",
+      "depends_on": "top-hcp-trx-all-time",
+      "expected_intent": "NEW_DATA",
+      "expected_steps": "single",
+      "gold_sql": null,
+      "expect": null,
+      "manual_checks": [
+        "Intent classifier → NEW_DATA (different metric: NRx instead of TRx).",
+        "Rewriter → 'Who is the top HCP by total NRx across all months?'.",
+        "Must run fresh SQL with SUM(nrx_cnt), NOT reuse the TRx result."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+hcp_id,full_name,specialty,tier,territory_id
+1000000001,Dr Blake Garcia,Rheumatology,C,1
+1000000002,Dr Avery Lee,Rheumatology,B,1
+1000000003,Dr Alex Lee,Rheumatology,C,1
+1000000004,Dr Alex Rodriguez,Rheumatology,C,1
+1000000005,Dr Taylor Davis,Nephrology,A,1
+1000000006,Dr Jamie Gonzalez,Rheumatology,C,1
+1000000007,Dr Jamie Miller,Rheumatology,C,1
+1000000008,Dr Hayden Jackson,Internal Medicine,A,1
+1000000009,Dr Blake Clark,Internal Medicine,C,1
+1000000010,Dr Alex Anderson,Rheumatology,B,1
+1000000011,Dr Rowan Davis,Internal Medicine,A,1
+1000000012,Dr Jamie Johnson,Rheumatology,B,1
+1000000013,Dr River Brown,Nephrology,B,1
+1000000014,Dr Quinn Wilson,Internal Medicine,C,1
+1000000015,Dr Sage Miller,Internal Medicine,B,1
+1000000016,Dr Phoenix Wilson,Rheumatology,B,1
+1000000017,Dr Avery Thomas,Rheumatology,C,1
+1000000018,Dr Jamie Wilson,Nephrology,C,1
+1000000019,Dr Parker Lopez,Rheumatology,C,1
+1000000020,Dr Blake Johnson,Nephrology,C,1
+1000000021,Dr Cameron Garcia,Nephrology,B,1
+1000000022,Dr Alex Patel,Internal Medicine,C,1
+1000000023,Dr Riley Johnson,Internal Medicine,C,1
+1000000024,Dr Sage White,Rheumatology,A,1
+1000000025,Dr Phoenix Lopez,Nephrology,C,1
+1000000026,Dr Drew Thomas,Rheumatology,A,1
+1000000027,Dr River Martinez,Nephrology,A,1
+1000000028,Dr Casey Miller,Nephrology,A,1
+1000000029,Dr Jamie Martinez,Nephrology,B,1
+1000000030,Dr Drew Wilson,Internal Medicine,A,1
+2000000001,Dr Phoenix Rodriguez,Rheumatology,B,2
+2000000002,Dr Phoenix Brown,Internal Medicine,C,2
+2000000003,Dr Sydney Thomas,Nephrology,C,2
+2000000004,Dr Taylor Lopez,Internal Medicine,B,2
+2000000005,Dr Sydney Patel,Rheumatology,B,2
+2000000006,Dr Drew Lee,Nephrology,A,2
+2000000007,Dr Blake Lopez,Internal Medicine,C,2
+2000000008,Dr Morgan Rodriguez,Nephrology,A,2
+2000000009,Dr Jordan Garcia,Rheumatology,A,2
+2000000010,Dr Parker Rodriguez,Nephrology,C,2
+2000000011,Dr Reese Thomas,Internal Medicine,B,2
+2000000012,Dr Casey Patel,Nephrology,C,2
+2000000013,Dr Sydney Anderson,Nephrology,A,2
+2000000014,Dr Taylor Smith,Rheumatology,A,2
+2000000015,Dr Rowan Garcia,Rheumatology,C,2
+2000000016,Dr Cameron Martinez,Internal Medicine,C,2
+2000000017,Dr Quinn Johnson,Internal Medicine,B,2
+2000000018,Dr Blake Lee,Rheumatology,C,2
+2000000019,Dr Sydney Chen,Internal Medicine,C,2
+2000000020,Dr Rowan Rodriguez,Rheumatology,C,2
+2000000021,Dr Riley Jackson,Rheumatology,A,2
+2000000022,Dr Jordan Rodriguez,Internal Medicine,B,2
+2000000023,Dr Jordan Patel,Rheumatology,B,2
+2000000024,Dr Jamie Lee,Nephrology,C,2
+2000000025,Dr Cameron Clark,Rheumatology,C,2
+2000000026,Dr Sage Davis,Rheumatology,C,2
+2000000027,Dr Phoenix Kim,Nephrology,B,2
+2000000028,Dr Taylor Gonzalez,Rheumatology,A,2
+2000000029,Dr Sage Jackson,Internal Medicine,B,2
+2000000030,Dr River Kim,Nephrology,B,2
+3000000001,Dr Parker Wilson,Rheumatology,B,3
+3000000002,Dr Quinn Chen,Internal Medicine,A,3
+3000000003,Dr Sydney Brown,Nephrology,A,3
+3000000004,Dr Riley Patel,Nephrology,B,3
+3000000005,Dr Sydney Lopez,Internal Medicine,A,3
+3000000006,Dr Sydney Johnson,Internal Medicine,A,3
+3000000007,Dr Jamie Davis,Nephrology,B,3
+3000000008,Dr Morgan Lee,Rheumatology,B,3
+3000000009,Dr Jordan Lee,Internal Medicine,B,3
+3000000010,Dr Blake Gonzalez,Rheumatology,A,3
+3000000011,Dr Riley Davis,Nephrology,B,3
+3000000012,Dr Reese Anderson,Rheumatology,C,3
+3000000013,Dr Phoenix Miller,Internal Medicine,A,3
+3000000014,Dr Quinn Davis,Internal Medicine,B,3
+3000000015,Dr Parker Lee,Rheumatology,A,3
+3000000016,Dr Phoenix Lee,Rheumatology,B,3
+3000000017,Dr Morgan Jackson,Rheumatology,B,3
+3000000018,Dr Rowan Chen,Internal Medicine,C,3
+3000000019,Dr River Anderson,Internal Medicine,C,3
+3000000020,Dr Drew Brown,Internal Medicine,A,3
+3000000021,Dr Jordan Clark,Rheumatology,A,3
+3000000022,Dr Jamie White,Rheumatology,B,3
+3000000023,Dr Phoenix Clark,Rheumatology,A,3
+3000000024,Dr Drew Johnson,Rheumatology,B,3
+3000000025,Dr Avery Chen,Internal Medicine,C,3
+3000000026,Dr Morgan White,Rheumatology,C,3
+3000000027,Dr Jordan Anderson,Nephrology,B,3
+3000000028,Dr Jamie Clark,Nephrology,C,3
+3000000029,Dr Rowan Martinez,Internal Medicine,A,3
+3000000030,Dr Blake Davis,Rheumatology,C,3

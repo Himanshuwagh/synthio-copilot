@@ -1,0 +1,25 @@
+account_id,name,account_type,address,territory_id
+1000,Mountain Hospital,Hospital,"San Francisco, CA",1
+1001,Pacific Hospital,Hospital,"Phoenix, AZ",1
+1002,Pacific Clinic,Hospital,"Denver, CO",1
+1003,Bay Medical Center,Clinic,"Portland, OR",1
+1004,Pacific Clinic,Hospital,"San Diego, CA",1
+1005,Bay Hospital,Hospital,"Portland, OR",1
+1006,Mountain Hospital,Hospital,"Seattle, WA",1
+1007,Bay Medical Center,Clinic,"San Francisco, CA",1
+1008,Bay Hospital,Clinic,"Denver, CO",2
+1009,Bay Clinic,Hospital,"San Diego, CA",2
+1010,Pacific Clinic,Hospital,"Denver, CO",2
+1011,Bay Medical Center,Clinic,"Portland, OR",2
+1012,Valley Medical Center,Hospital,"San Francisco, CA",2
+1013,Bay Clinic,Clinic,"Portland, OR",2
+1014,Pacific Clinic,Clinic,"San Diego, CA",2
+1015,Mountain Hospital,Clinic,"San Francisco, CA",2
+1016,Pacific Clinic,Hospital,"Phoenix, AZ",3
+1017,Valley Medical Center,Hospital,"Phoenix, AZ",3
+1018,Mountain Clinic,Clinic,"Denver, CO",3
+1019,Pacific Clinic,Hospital,"Portland, OR",3
+1020,Pacific Hospital,Clinic,"San Francisco, CA",3
+1021,Bay Clinic,Clinic,"San Francisco, CA",3
+1022,Valley Hospital,Clinic,"San Diego, CA",3
+1023,Pacific Hospital,Clinic,"Phoenix, AZ",3
