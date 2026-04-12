@@ -1,6 +1,6 @@
 # Pharma Sales Co-pilot
 
-**[Live Demo: Try it here](https://synthio-copilot.onrender.com)** 
+**[Live Demo: Try it here](https://synthio-copilot.onrender.com)**  (*Cold start: might take few seconds to start first time*)
 
 This project is a fast, conversational intelligence co-pilot designed for pharmaceutical sales representatives. It allows field reps to ask natural language questions and instantly get accurate insights derived from complex, relational healthcare datasets.
 
