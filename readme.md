@@ -1,4 +1,4 @@
-# Pharma Sales Co-pilot
+## Pharma Sales Co-pilot
 
 **[Live Demo: Try it here](https://synthio-copilot.onrender.com)**  (*Cold start: might take few seconds to start first time*)
 
