@@ -63,9 +63,14 @@ def main():
 
         print("\n[Thinking...]\n")
 
-        answer = agent.run(question, history)
+        result = agent.run(question, history)
+        answer = result.get("answer", "") if isinstance(result, dict) else str(result)
 
         print(f"Co-pilot: {answer}")
+        if result.get("interpretation") and result["interpretation"].lower() != question.lower():
+            print(f"\n  [Interpreted as: {result['interpretation']}]")
+        if result.get("alternatives"):
+            print(f"  [Alternatives: {', '.join(a['label'] for a in result['alternatives'])}]")
         print(f"\n{DIVIDER}")
 
         save_turn(question, answer)

@@ -96,7 +96,7 @@ async def chat_endpoint(req: ChatRequest) -> JSONResponse:
     # connection is created during startup on this same thread; DuckDB
     # does not allow using that connection from worker threads (hangs).
     try:
-        answer: str = agent.run(
+        result: dict = agent.run(
             req.message,
             history,
             session_id=sid or None,
@@ -104,5 +104,9 @@ async def chat_endpoint(req: ChatRequest) -> JSONResponse:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    save_turn(req.message, answer, session_id=sid if supabase_on else None)
-    return JSONResponse({"answer": answer})
+    answer_text: str = result.get("answer", "")
+    save_turn(req.message, answer_text, session_id=sid if supabase_on else None)
+
+    # Return the full structured result so the UI can render interpretation,
+    # alternative chips, collapsible SQL, and empty-result diagnostics.
+    return JSONResponse(result)
