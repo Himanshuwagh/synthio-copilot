@@ -18,7 +18,8 @@ from collections import OrderedDict
 from typing import Optional, Tuple
 
 from prompts import (
-    SYSTEM_PROMPT,
+    PLANNER_SYSTEM,
+    SQL_SYSTEM_PROMPT,
     REWRITER_PROMPT,
     INTENT_PROMPT,
     FOLLOWUP_SYNTH_SYSTEM,
@@ -26,13 +27,16 @@ from prompts import (
     PLANNER_PROMPT,
     SQL_PROMPT,
     SQL_RETRY_PROMPT,
+    SQL_EMPTY_RETRY_PROMPT,
     SYNTHESIZER_SYSTEM,
     SYNTHESIZER_PROMPT,
 )
 from llm_client import chat as _llm_chat
+from db import gather_empty_sql_diagnostics
 
 _conn = None
-_schema = ""
+# Full SQL context (profile + glossary + DESCRIBE). Used only for SQL steps — not for planner.
+_sql_context = ""
 
 # Last-turn cache per browser/session id so concurrent users never share context.
 _LAST_TURN_MAX = 512
@@ -71,7 +75,7 @@ def _answer_cache_key(resolved: str, history: list, session_scope: str) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
-    return hashlib.sha256((payload + "\0" + _schema).encode("utf-8")).hexdigest()
+    return hashlib.sha256((payload + "\0" + _sql_context).encode("utf-8")).hexdigest()
 
 
 def _answer_cache_get(key: str) -> Optional[Tuple[str, str]]:
@@ -107,9 +111,9 @@ def _looks_like_reuse_intent(question: str) -> bool:
 
 
 def init(conn, schema: str) -> None:
-    global _conn, _schema
+    global _conn, _sql_context
     _conn = conn
-    _schema = schema
+    _sql_context = schema
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,6 +165,80 @@ def format_history(history: list) -> str:
         role = "You" if msg["role"] == "user" else "Co-pilot"
         lines.append(f"{role}: {msg['message']}")
     return "\n".join(lines)
+
+
+def _sql_step_result(system: str, sub_q: str, prior_results: str) -> str:
+    """
+    Generate SQL, execute, retry on SQL errors, then on empty results run diagnostics + one LLM rewrite.
+    """
+    if _conn is None:
+        return "[Agent error: database is not initialized]"
+
+    sql = llm_call(
+        system=system,
+        user=SQL_PROMPT.format(
+            sub_question=sub_q,
+            prior_results=prior_results,
+        ),
+        max_tokens=2048,
+    )
+    sql = clean_sql(sql)
+
+    df = None
+    try:
+        df = _conn.execute(sql).df()
+    except Exception as first_error:
+        sql_retry = llm_call(
+            system=system,
+            user=SQL_RETRY_PROMPT.format(
+                sub_question=sub_q,
+                failed_sql=sql,
+                error=str(first_error),
+            ),
+            max_tokens=2048,
+        )
+        sql_retry = clean_sql(sql_retry)
+        try:
+            df = _conn.execute(sql_retry).df()
+            sql = sql_retry
+        except Exception as second_error:
+            return f"[Could not retrieve data: {second_error}]"
+
+    if df is not None and not df.empty:
+        return df.to_string(index=False)
+
+    diag = gather_empty_sql_diagnostics(_conn, sql)
+    sql_empty = llm_call(
+        system=system,
+        user=SQL_EMPTY_RETRY_PROMPT.format(
+            sub_question=sub_q,
+            failed_sql=sql,
+            diagnostics=diag,
+        ),
+        max_tokens=2048,
+    )
+    sql_empty = clean_sql(sql_empty)
+    try:
+        df2 = _conn.execute(sql_empty).df()
+    except Exception as empty_fix_err:
+        return (
+            "(no rows returned)\n"
+            f"--- SQL attempted ---\n{sql}\n"
+            f"--- Diagnostics ---\n{diag}\n"
+            f"--- Empty-result rewrite failed ---\n{empty_fix_err}"
+        )
+
+    if not df2.empty:
+        return df2.to_string(index=False)
+
+    diag2 = gather_empty_sql_diagnostics(_conn, sql_empty)
+    return (
+        "(no rows returned)\n"
+        f"--- SQL attempted ---\n{sql}\n"
+        f"--- Empty-result SQL ---\n{sql_empty}\n"
+        f"--- Diagnostics (original) ---\n{diag}\n"
+        f"--- Diagnostics (after empty retry) ---\n{diag2}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,7 +295,7 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> str:
     if history and _ACK_RE.match(qstrip):
         return "You're welcome! Ask if you need anything else about the sales data."
 
-    system = SYSTEM_PROMPT.format(schema=_schema)
+    sql_system = SQL_SYSTEM_PROMPT.format(schema=_sql_context)
 
     # ── Step 0a: Rewrite for context resolution (always runs) ──────────
     resolved = _rewrite_question(question, history)
@@ -263,7 +341,7 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> str:
 
     # ── Step 1: Planner ──────────────────────────────────────────────────────
     plan = llm_call(
-        system=system,
+        system=PLANNER_SYSTEM,
         user=PLANNER_PROMPT.format(
             question=resolved,
             history=format_history(history[-4:]),
@@ -303,37 +381,9 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> str:
     results = {}
     for i, sub_q in enumerate(sub_questions):
         step_key = f"step_{i + 1}"
-
-        sql = llm_call(
-            system=system,
-            user=SQL_PROMPT.format(
-                sub_question=sub_q,
-                prior_results=format_results(results),
-            ),
-            max_tokens=2048,
+        results[step_key] = _sql_step_result(
+            sql_system, sub_q, format_results(results)
         )
-        sql = clean_sql(sql)
-
-        try:
-            df = _conn.execute(sql).df()
-            results[step_key] = df.to_string(index=False) if not df.empty else "(no rows returned)"
-        except Exception as first_error:
-            sql_retry = llm_call(
-                system=system,
-                user=SQL_RETRY_PROMPT.format(
-                    sub_question=sub_q,
-                    failed_sql=sql,
-                    error=str(first_error),
-                ),
-                max_tokens=2048,
-            )
-            sql_retry = clean_sql(sql_retry)
-
-            try:
-                df = _conn.execute(sql_retry).df()
-                results[step_key] = df.to_string(index=False) if not df.empty else "(no rows returned)"
-            except Exception as second_error:
-                results[step_key] = f"[Could not retrieve data: {second_error}]"
 
     # ── Step 4: Synthesize ───────────────────────────────────────────────────
     answer = llm_call(

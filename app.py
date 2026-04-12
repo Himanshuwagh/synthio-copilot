@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 import agent
 from config import get_supabase_settings, reset_llm_settings_cache
 from context import load_history, save_turn
-from db import get_connection, get_schema
+from db import build_sql_system_context, get_connection
 
 _static = Path(__file__).parent / "static"
 
@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     print("Loading data and initialising agent…", flush=True)
     reset_llm_settings_cache()
     conn = get_connection()
-    schema = get_schema(conn)
+    schema = build_sql_system_context(conn)
     agent.init(conn, schema)
     print("✓ Ready", flush=True)
     yield
