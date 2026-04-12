@@ -3,7 +3,7 @@
 
 import sys
 import agent
-from db import get_connection, get_schema
+from db import build_sql_system_context, get_connection
 from context import load_history, save_turn
 
 BANNER = """
@@ -25,7 +25,7 @@ def main():
     print("Loading data...", end=" ", flush=True)
     try:
         conn = get_connection()
-        schema = get_schema(conn)
+        schema = build_sql_system_context(conn)
         print("✓ Ready\n")
     except Exception as e:
         print(f"\n✗ Failed to load data: {e}")
