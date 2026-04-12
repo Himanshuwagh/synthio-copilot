@@ -3,6 +3,7 @@
 # Flow:
 #   0a. Rewriter → resolve vague / follow-up messages into standalone questions
 #   0b. Intent   → REUSE_DATA (elaborate from cache) vs NEW_DATA (run SQL)
+#   0c. Ambiguity → detect metric ambiguity; surface alternatives to the user
 #   1.  Planner  → classify question as SIMPLE or COMPLEX
 #   2.  SQL loop → generate + execute SQL per sub-question (1 retry on failure)
 #   3.  Synthesizer → produce a plain-English answer from all gathered data
@@ -10,6 +11,10 @@
 # Cost controls: skip rewriter when history is empty; heuristic reuse-intent;
 # short acknowledgments without LLM; bounded LRU answer cache; lower max_tokens
 # on short structured outputs.
+#
+# Return value: agent.run() always returns a dict (see _make_result helper).
+# The "answer" key is always a plain string; the rest provides product-instinct
+# metadata consumed by the UI (interpretation, alternatives, sql_steps, etc.).
 
 import hashlib
 import json
@@ -30,6 +35,7 @@ from prompts import (
     SQL_EMPTY_RETRY_PROMPT,
     SYNTHESIZER_SYSTEM,
     SYNTHESIZER_PROMPT,
+    AMBIGUITY_PROMPT,
 )
 from llm_client import chat as _llm_chat
 from db import gather_empty_sql_diagnostics
@@ -49,6 +55,17 @@ _ACK_RE = re.compile(
     r"^\s*(thanks?|thank\s+you|thx|ok+ay|got\s+it|cool|nice|great)\s*[!.,]?\s*$",
     re.I,
 )
+
+# Heuristic patterns that indicate a potentially ambiguous question.
+# Only these trigger the LLM ambiguity check — keeps it cheap.
+_AMBIGUOUS_PATTERNS = [
+    re.compile(r'\btop\s*\d*\s*(hcps?|reps?|accounts?|territories?)\b', re.I),
+    re.compile(r'\bbest\s+(performing|hcps?|reps?|accounts?)\b', re.I),
+    re.compile(r'\bwho\s+should\s+i\s+(focus|prioritize|visit)\b', re.I),
+    re.compile(r'\b(under|over)(performing|visited)\b', re.I),
+    re.compile(r'\bperformance\s+(breakdown|by|of|across)\b', re.I),
+    re.compile(r'\bwhich\s+(hcps?|reps?|accounts?)\s+(are|have)\s+(the\s+)?(best|worst|top|highest|lowest)\b', re.I),
+]
 
 
 def _session_scope(session_id: Optional[str]) -> str:
@@ -167,12 +184,19 @@ def format_history(history: list) -> str:
     return "\n".join(lines)
 
 
-def _sql_step_result(system: str, sub_q: str, prior_results: str) -> str:
+def _sql_step_result(system: str, sub_q: str, prior_results: str) -> dict:
     """
     Generate SQL, execute, retry on SQL errors, then on empty results run diagnostics + one LLM rewrite.
+
+    Returns a dict:
+      {
+        "result":     str,          # data text passed to the synthesizer
+        "sql":        str,          # the final SQL (succeeded or last attempted)
+        "diagnostic": str | None,   # diagnostic info if query returned no rows
+      }
     """
     if _conn is None:
-        return "[Agent error: database is not initialized]"
+        return {"result": "[Agent error: database is not initialized]", "sql": "", "diagnostic": None}
 
     sql = llm_call(
         system=system,
@@ -202,11 +226,21 @@ def _sql_step_result(system: str, sub_q: str, prior_results: str) -> str:
             df = _conn.execute(sql_retry).df()
             sql = sql_retry
         except Exception as second_error:
-            return f"[Could not retrieve data: {second_error}]"
+            human_msg = (
+                "I couldn't compute this result — the query failed after two attempts. "
+                "Try rephrasing or asking about a specific time period."
+            )
+            return {
+                "result": f"[Could not retrieve data: {second_error}]",
+                "sql": sql_retry,
+                "diagnostic": None,
+                "error_message": human_msg,
+            }
 
     if df is not None and not df.empty:
-        return df.to_string(index=False)
+        return {"result": df.to_string(index=False), "sql": sql, "diagnostic": None}
 
+    # Empty result path: gather diagnostics and attempt one rewrite
     diag = gather_empty_sql_diagnostics(_conn, sql)
     sql_empty = llm_call(
         system=system,
@@ -221,24 +255,28 @@ def _sql_step_result(system: str, sub_q: str, prior_results: str) -> str:
     try:
         df2 = _conn.execute(sql_empty).df()
     except Exception as empty_fix_err:
-        return (
-            "(no rows returned)\n"
-            f"--- SQL attempted ---\n{sql}\n"
-            f"--- Diagnostics ---\n{diag}\n"
-            f"--- Empty-result rewrite failed ---\n{empty_fix_err}"
-        )
+        return {
+            "result": "(no rows returned)\n"
+                      f"--- SQL attempted ---\n{sql}\n"
+                      f"--- Diagnostics ---\n{diag}\n"
+                      f"--- Empty-result rewrite failed ---\n{empty_fix_err}",
+            "sql": sql,
+            "diagnostic": diag,
+        }
 
     if not df2.empty:
-        return df2.to_string(index=False)
+        return {"result": df2.to_string(index=False), "sql": sql_empty, "diagnostic": None}
 
     diag2 = gather_empty_sql_diagnostics(_conn, sql_empty)
-    return (
-        "(no rows returned)\n"
-        f"--- SQL attempted ---\n{sql}\n"
-        f"--- Empty-result SQL ---\n{sql_empty}\n"
-        f"--- Diagnostics (original) ---\n{diag}\n"
-        f"--- Diagnostics (after empty retry) ---\n{diag2}"
-    )
+    combined_diag = f"{diag}\n\n--- After relaxed query ---\n{diag2}"
+    return {
+        "result": "(no rows returned)\n"
+                  f"--- SQL attempted ---\n{sql}\n"
+                  f"--- Empty-result SQL ---\n{sql_empty}\n"
+                  f"--- Diagnostics ---\n{combined_diag}",
+        "sql": sql_empty,
+        "diagnostic": combined_diag,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,29 +322,110 @@ def _handle_followup(
     )
 
 
-def run(question: str, history: list, session_id: Optional[str] = None) -> str:
+def _extract_json(text: str) -> dict:
+    """Extract the first JSON object from an LLM response (handles markdown fences)."""
+    text = text.strip()
+    # Strip markdown fences
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+    # Find first {...} block (handles nested braces one level deep)
+    match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def _check_ambiguity(question: str) -> dict:
+    """
+    Detect whether a question has multiple valid metric interpretations.
+
+    Returns:
+      {
+        "is_ambiguous": bool,
+        "interpretation": str,   # default interpretation we will answer
+        "alternatives": list,    # [{label, query}, ...]
+      }
+
+    Only runs an LLM call when the question matches known ambiguous patterns —
+    this keeps cost/latency impact minimal for unambiguous queries.
+    """
+    is_candidate = any(p.search(question) for p in _AMBIGUOUS_PATTERNS)
+    if not is_candidate:
+        return {"is_ambiguous": False, "interpretation": "", "alternatives": []}
+
+    raw = llm_call(
+        system="You analyze analytics questions for metric ambiguity. Return ONLY valid JSON.",
+        user=AMBIGUITY_PROMPT.format(question=question),
+        max_tokens=384,
+    )
+
+    if not raw or raw.startswith("[LLM error"):
+        return {"is_ambiguous": False, "interpretation": "", "alternatives": []}
+
+    data = _extract_json(raw)
+    return {
+        "is_ambiguous": bool(data.get("is_ambiguous", False)),
+        "interpretation": str(data.get("interpretation", "")),
+        "alternatives": list(data.get("alternatives", [])),
+    }
+
+
+def _make_result(
+    answer: str,
+    interpretation: str = "",
+    alternatives: Optional[list] = None,
+    sql_steps: Optional[list] = None,
+    empty_diagnostic: Optional[str] = None,
+    warning: Optional[str] = None,
+) -> dict:
+    """Construct the standardised return dict for agent.run()."""
+    return {
+        "answer": answer,
+        "interpretation": interpretation,
+        "alternatives": alternatives or [],
+        "sql_steps": sql_steps or [],
+        "empty_diagnostic": empty_diagnostic,
+        "warning": warning,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+def run(question: str, history: list, session_id: Optional[str] = None) -> dict:
+    """
+    Execute the full pipeline and return a structured result dict:
+      - answer:          plain-English answer (always a string)
+      - interpretation:  how the system understood the question
+      - alternatives:    list of [{label, query}] for ambiguous questions
+      - sql_steps:       list of [{step, question, sql}] for transparency
+      - empty_diagnostic: diagnostic text when no data was found
+      - warning:         context warning when the answer may be incomplete
+    """
     if _conn is None:
-        return "[Agent error: database is not initialized]"
+        return _make_result("[Agent error: database is not initialized]")
 
     scope = _session_scope(session_id)
     last_turn = _last_turn_get(scope)
 
     qstrip = question.strip()
     if history and _ACK_RE.match(qstrip):
-        return "You're welcome! Ask if you need anything else about the sales data."
+        return _make_result("You're welcome! Ask if you need anything else about the sales data.")
 
     sql_system = SQL_SYSTEM_PROMPT.format(schema=_sql_context)
 
-    # ── Step 0a: Rewrite for context resolution (always runs) ──────────
+    # ── Step 0a: Rewrite for context resolution ─────────────────────────────
     resolved = _rewrite_question(question, history)
 
-    # ── Step 0b: Classify intent — can we reuse cached data? ─────────────
+    # ── Step 0b: Classify intent — can we reuse cached data? ─────────────────
     if last_turn and _looks_like_reuse_intent(question):
         intent = "REUSE_DATA"
     else:
         intent = _classify_intent(question, history, last_turn)
 
-    # ── Fast path: pure elaboration/explanation on same data ─────────────
+    # ── Fast path: pure elaboration/explanation on same data ─────────────────
     if intent == "REUSE_DATA" and last_turn:
         answer = _handle_followup(question, resolved, history, last_turn)
         _last_turn_set(
@@ -318,12 +437,14 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> str:
                 "results_text": last_turn.get("results_text", ""),
             },
         )
-        return answer
+        return _make_result(answer, interpretation=resolved)
 
-    # ── Everything else (including scope-changing follow-ups like
-    #    "what about rep 2?") goes through the full SQL pipeline
-    #    using the rewritten standalone question. ─────────────────────────
+    # ── Step 0c: Ambiguity detection (only for new data queries) ─────────────
+    ambiguity = _check_ambiguity(resolved)
+    interpretation = ambiguity["interpretation"] if ambiguity["is_ambiguous"] else ""
+    alternatives = ambiguity["alternatives"] if ambiguity["is_ambiguous"] else []
 
+    # ── Cache check ───────────────────────────────────────────────────────────
     cache_key = _answer_cache_key(resolved, history, scope)
     cached = _answer_cache_get(cache_key)
     if cached is not None:
@@ -337,9 +458,14 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> str:
                 "results_text": results_text,
             },
         )
-        return answer
+        # Return cached answer; alternatives still shown (computed above)
+        return _make_result(
+            answer,
+            interpretation=interpretation or resolved,
+            alternatives=alternatives,
+        )
 
-    # ── Step 1: Planner ──────────────────────────────────────────────────────
+    # ── Step 1: Planner ───────────────────────────────────────────────────────
     plan = llm_call(
         system=PLANNER_SYSTEM,
         user=PLANNER_PROMPT.format(
@@ -352,40 +478,52 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> str:
     if plan.startswith("[LLM error"):
         try:
             from config import get_llm_settings
-
             prov = get_llm_settings().provider
         except Exception:
             prov = "ollama"
         detail = plan
         if detail.startswith("[LLM error: ") and detail.endswith("]"):
-            detail = detail[len("[LLM error: ") : -1].strip()
+            detail = detail[len("[LLM error: "):-1].strip()
         if prov == "ollama":
-            return (
+            msg = (
                 "Sorry, I couldn't reach the local LLM. Is Ollama running? "
                 "(`ollama serve`) Also check `model` in config.ini.\n\n"
                 f"Details: {detail}"
             )
-        return (
-            "Sorry, the cloud LLM request failed. Check API keys in `.env`, "
-            "`provider` and `model` in `config.ini`, and restart the server after changes.\n\n"
-            f"Details: {detail}"
-        )
+        else:
+            msg = (
+                "Sorry, the cloud LLM request failed. Check API keys in `.env`, "
+                "`provider` and `model` in `config.ini`, and restart the server after changes.\n\n"
+                f"Details: {detail}"
+            )
+        return _make_result(msg, interpretation=resolved, alternatives=alternatives)
 
-    # ── Step 2: Route ────────────────────────────────────────────────────────
+    # ── Step 2: Route ─────────────────────────────────────────────────────────
     if "COMPLEX" in plan.upper():
         sub_questions = parse_sub_questions(plan)
     else:
         sub_questions = [resolved]
 
-    # ── Step 3: SQL Execution Loop ───────────────────────────────────────────
-    results = {}
+    # ── Step 3: SQL Execution Loop ────────────────────────────────────────────
+    results: dict[str, str] = {}
+    sql_steps: list[dict] = []
+    empty_diagnostic: Optional[str] = None
+
     for i, sub_q in enumerate(sub_questions):
         step_key = f"step_{i + 1}"
-        results[step_key] = _sql_step_result(
-            sql_system, sub_q, format_results(results)
-        )
+        step_data = _sql_step_result(sql_system, sub_q, format_results(results))
 
-    # ── Step 4: Synthesize ───────────────────────────────────────────────────
+        results[step_key] = step_data["result"]
+        if step_data.get("sql"):
+            sql_steps.append({
+                "step": step_key,
+                "question": sub_q,
+                "sql": step_data["sql"],
+            })
+        if step_data.get("diagnostic") and not empty_diagnostic:
+            empty_diagnostic = step_data["diagnostic"]
+
+    # ── Step 4: Synthesize ────────────────────────────────────────────────────
     answer = llm_call(
         system=SYNTHESIZER_SYSTEM,
         user=SYNTHESIZER_PROMPT.format(
@@ -410,4 +548,17 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> str:
     if not answer.startswith("[LLM error"):
         _answer_cache_set(cache_key, answer, results_text)
 
-    return answer
+    # Expose the empty diagnostic only when the final answer actually says "no data"
+    expose_diag = empty_diagnostic if (
+        empty_diagnostic
+        and answer
+        and ("no data" in answer.lower() or "no rows" in answer.lower() or "not found" in answer.lower())
+    ) else None
+
+    return _make_result(
+        answer,
+        interpretation=interpretation or resolved,
+        alternatives=alternatives,
+        sql_steps=sql_steps,
+        empty_diagnostic=expose_diag,
+    )

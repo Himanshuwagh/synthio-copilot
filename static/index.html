@@ -453,6 +453,147 @@
       to   { opacity: 1; transform: translateY(0); }
     }
     .msg-row { animation: fadeUp 0.2s ease; }
+
+    /* ── Product-instinct UI components ─────────────── */
+
+    /* Instinct 1 — Interpretation banner */
+    .interp-banner {
+      font-family: var(--font-ui);
+      font-size: 12px;
+      color: #4338ca;
+      background: #eef2ff;
+      border-left: 3px solid #6366f1;
+      border-radius: 0 6px 6px 0;
+      padding: 6px 10px;
+      margin-bottom: 10px;
+      line-height: 1.45;
+    }
+    .interp-banner strong { font-weight: 600; }
+
+    /* Instinct 1 — Alternative interpretation chips */
+    .alt-section { margin-top: 12px; }
+    .alt-label {
+      font-family: var(--font-ui);
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 5px;
+      font-weight: 500;
+      letter-spacing: 0.03em;
+    }
+    .alt-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .alt-chip {
+      font-family: var(--font-ui);
+      padding: 5px 12px;
+      border-radius: 20px;
+      border: 1px solid #e0e0de;
+      background: #fafaf8;
+      font-size: 12px;
+      color: #374151;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+    .alt-chip:hover {
+      background: #eef2ff;
+      border-color: #6366f1;
+      color: #4338ca;
+    }
+
+    /* Instinct 2 — Collapsible SQL / data sources */
+    .sql-toggle {
+      margin-top: 12px;
+      width: 100%;
+      text-align: left;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 7px 11px;
+      font-size: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-family: var(--font-ui);
+      transition: background 0.15s, color 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .sql-toggle:hover { background: #f5f5f3; color: var(--text); }
+    .sql-toggle .toggle-arrow {
+      transition: transform 0.2s ease;
+      flex-shrink: 0;
+    }
+    .sql-toggle.open .toggle-arrow { transform: rotate(90deg); }
+
+    .sql-panel {
+      display: none;
+      margin-top: 6px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #fafaf8;
+    }
+    .sql-panel.open { display: block; }
+
+    .sql-step {
+      padding: 10px 12px;
+      border-bottom: 1px solid #f0f0ee;
+    }
+    .sql-step:last-child { border-bottom: none; }
+
+    .sql-step-label {
+      font-family: var(--font-ui);
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .sql-code {
+      background: #1a1a1a;
+      color: #e4e4e4;
+      padding: 9px 12px;
+      border-radius: 6px;
+      font-size: 11.5px;
+      font-family: 'SF Mono', 'Fira Mono', 'Menlo', monospace;
+      overflow-x: auto;
+      white-space: pre;
+      line-height: 1.5;
+    }
+
+    /* Instinct 3 — Empty result diagnostic */
+    .empty-diagnostic {
+      margin-top: 12px;
+      padding: 10px 13px;
+      background: #fffbeb;
+      border: 1px solid #fcd34d;
+      border-radius: 8px;
+      font-family: var(--font-ui);
+      font-size: 12.5px;
+      color: #92400e;
+    }
+    .empty-diagnostic-title {
+      font-weight: 600;
+      margin-bottom: 3px;
+    }
+    .empty-diagnostic-desc { color: #a16207; margin-bottom: 6px; }
+    .empty-diagnostic pre {
+      background: #fef3c7;
+      padding: 7px 9px;
+      border-radius: 5px;
+      font-size: 11px;
+      color: #78350f;
+      white-space: pre-wrap;
+      font-family: 'SF Mono', 'Fira Mono', monospace;
+      margin: 0;
+    }
+
+    /* Instinct 4 — Fatal error state */
+    .error-bubble {
+      background: #fff1f2;
+      border: 1px solid #fecdd3;
+      color: #9f1239;
+    }
   </style>
 </head>
 <body>
@@ -712,7 +853,7 @@
     setTimeout(() => chatInput.focus(), 50);
   }
 
-  // ── Append a message bubble ────────────────────────
+  // ── Append a plain message bubble (used for user messages + history replay) ──
   function appendMessage(role, text) {
     const row    = document.createElement('div');
     row.className = `msg-row ${role}`;
@@ -734,6 +875,147 @@
     row.appendChild(bubble);
     chatAreaEl.appendChild(row);
     scrollBottom();
+    return row;
+  }
+
+  // ── Render a structured agent response (product-instinct UI) ──────────────
+  //
+  //  Layout inside the AI bubble:
+  //   1. [Interpretation banner]   — "I interpreted this as: …"
+  //   2. [Main answer]             — markdown prose
+  //   3. [Alternative chips]       — "Also explore: [By NRx growth] [By tier] …"
+  //   4. [▶ View SQL & data]        — collapsible SQL panel (Instinct 2)
+  //   5. [No data diagnostic]      — amber box with diagnostic detail (Instinct 3)
+  //
+  function renderStructuredMessage(data, originalQuestion) {
+    const row = document.createElement('div');
+    row.className = 'msg-row ai';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+
+    // ── 1. Interpretation banner ──────────────────────────────────────────
+    // Show when the system resolved/rewrote the question OR when it chose
+    // a specific interpretation from an ambiguous question.
+    const interp = (data.interpretation || '').trim();
+    const origLower = (originalQuestion || '').trim().toLowerCase();
+    const showBanner = interp && interp.toLowerCase() !== origLower;
+    if (showBanner) {
+      const banner = document.createElement('div');
+      banner.className = 'interp-banner';
+      banner.innerHTML = '<strong>I interpreted this as:</strong> ' + escapeHtml(interp);
+      bubble.appendChild(banner);
+    }
+
+    // ── 2. Main answer ────────────────────────────────────────────────────
+    const answerDiv = document.createElement('div');
+    const answerText = typeof data.answer === 'string' ? data.answer : String(data.answer ?? '');
+    try {
+      answerDiv.innerHTML = marked.parse(answerText);
+    } catch (e) {
+      answerDiv.textContent = answerText;
+    }
+    bubble.appendChild(answerDiv);
+
+    // ── 3. Alternative interpretation chips ───────────────────────────────
+    const alts = Array.isArray(data.alternatives) ? data.alternatives : [];
+    if (alts.length > 0) {
+      const section = document.createElement('div');
+      section.className = 'alt-section';
+
+      const label = document.createElement('div');
+      label.className = 'alt-label';
+      label.textContent = 'Also explore:';
+      section.appendChild(label);
+
+      const chips = document.createElement('div');
+      chips.className = 'alt-chips';
+      alts.forEach(alt => {
+        if (!alt || !alt.label) return;
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'alt-chip';
+        chip.textContent = alt.label;
+        chip.title = alt.query || alt.label;
+        chip.addEventListener('click', () => sendMessage(alt.query || alt.label));
+        chips.appendChild(chip);
+      });
+      section.appendChild(chips);
+      bubble.appendChild(section);
+    }
+
+    // ── 4. Collapsible SQL & data sources panel ───────────────────────────
+    const steps = Array.isArray(data.sql_steps)
+      ? data.sql_steps.filter(s => s && s.sql)
+      : [];
+    if (steps.length > 0) {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'sql-toggle';
+      toggle.innerHTML =
+        '<svg class="toggle-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
+        'stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
+        '<polyline points="9 18 15 12 9 6"/></svg>' +
+        '<span>View SQL &amp; data sources</span>';
+
+      const panel = document.createElement('div');
+      panel.className = 'sql-panel';
+
+      steps.forEach((step, idx) => {
+        const stepDiv = document.createElement('div');
+        stepDiv.className = 'sql-step';
+
+        const lbl = document.createElement('div');
+        lbl.className = 'sql-step-label';
+        lbl.textContent = steps.length > 1
+          ? 'Step ' + (idx + 1) + (step.question ? ': ' + step.question : '')
+          : 'SQL query';
+        stepDiv.appendChild(lbl);
+
+        const code = document.createElement('div');
+        code.className = 'sql-code';
+        code.textContent = step.sql;
+        stepDiv.appendChild(code);
+
+        panel.appendChild(stepDiv);
+      });
+
+      toggle.addEventListener('click', () => {
+        const isOpen = panel.classList.toggle('open');
+        toggle.classList.toggle('open', isOpen);
+      });
+
+      bubble.appendChild(toggle);
+      bubble.appendChild(panel);
+    }
+
+    // ── 5. Empty-result diagnostic ────────────────────────────────────────
+    if (data.empty_diagnostic) {
+      const diagBox = document.createElement('div');
+      diagBox.className = 'empty-diagnostic';
+
+      const title = document.createElement('div');
+      title.className = 'empty-diagnostic-title';
+      title.textContent = 'No matching data found';
+      diagBox.appendChild(title);
+
+      const desc = document.createElement('div');
+      desc.className = 'empty-diagnostic-desc';
+      desc.textContent =
+        'This could mean the filter is too narrow or the data doesn\'t cover this period.';
+      diagBox.appendChild(desc);
+
+      const pre = document.createElement('pre');
+      pre.textContent = data.empty_diagnostic;
+      diagBox.appendChild(pre);
+
+      bubble.appendChild(diagBox);
+    }
+
+    row.appendChild(bubble);
+    chatAreaEl.appendChild(row);
+    scrollBottom();
+    return row;
   }
 
   function scrollBottom() {
@@ -797,17 +1079,28 @@
           const errBody = await res.json();
           if (errBody.detail) detail = typeof errBody.detail === 'string' ? errBody.detail : JSON.stringify(errBody.detail);
         } catch (e) { /* ignore */ }
-        throw new Error(`Server error (${res.status}): ${detail}`);
+        // Instinct 4: human-friendly server error, not a raw status code
+        throw new Error(
+          res.status >= 500
+            ? "I couldn't compute this — the server encountered an error. Try rephrasing or asking about a specific time period."
+            : `Request failed (${res.status}): ${detail}`
+        );
       }
 
       const data = await res.json();
+      // Support both legacy {answer: string} and new structured response
       const answer = typeof data.answer === 'string' ? data.answer : null;
       if (answer == null) throw new Error('Server returned no answer');
 
       if (rid !== state.requestId) return;
 
       hideThinking();
-      appendMessage('ai', answer);
+      // Use structured rendering when metadata is present, plain for simple ack replies
+      if (data.sql_steps || data.alternatives || data.interpretation || data.empty_diagnostic) {
+        renderStructuredMessage(data, text);
+      } else {
+        appendMessage('ai', answer);
+      }
 
       state.history.push({ role: 'user',      message: text   });
       state.history.push({ role: 'assistant', message: answer });
@@ -822,11 +1115,19 @@
       if (err.name === 'AbortError') {
         msg = state.userStopped
           ? 'Generation stopped.'
-          : `Request timed out after ${timeoutMs / 60000} minutes. The model may be slow or stuck — try again or restart Ollama.`;
+          : `Request timed out after ${timeoutMs / 60000} minutes. The model may be slow — try again or restart Ollama.`;
       } else {
         msg = err.message;
       }
-      appendMessage('ai', `⚠️ ${msg}`);
+      // Instinct 4: render errors in a visually distinct bubble, not inline ⚠️ text
+      const errRow = document.createElement('div');
+      errRow.className = 'msg-row ai';
+      const errBubble = document.createElement('div');
+      errBubble.className = 'msg-bubble error-bubble';
+      errBubble.textContent = msg;
+      errRow.appendChild(errBubble);
+      chatAreaEl.appendChild(errRow);
+      scrollBottom();
     } finally {
       clearTimeout(timer);
       if (state.abortCtrl === ctrl) state.abortCtrl = null;
