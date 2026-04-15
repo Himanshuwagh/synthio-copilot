@@ -14,8 +14,7 @@ This one has five extra layers designed for real-world reliability:
 | **Query rewriter** | Resolves vague follow-ups ("what about last month?") into standalone questions before touching SQL | Prevents bad SQL from misinterpreted context |
 | **Intent classifier** | Detects if the new question just wants elaboration on existing data vs. a fresh DB query | Skips unnecessary SQL round-trips |
 | **Ambiguity detector** | Regex-gates an LLM check on questions like "show me top HCPs" — surfaces metric alternatives (NRx? TRx? visits?) to the user | Avoids silently answering the wrong question |
-| **Self-correcting SQL loop** | On failure → feeds error back to LLM for a rewrite. On empty result → runs diagnostics + rewrites with relaxed filters | Handles hallucinated joins & jargon (e.g. "rheum docs") transparently |
-| **LRU answer cache** | SHA-256 keys last 4 turns + schema; bounded `OrderedDict` per session | Multi-user safe; avoids redundant LLM calls on repeat questions |
+| **Self-correcting SQL loop** | On failure → feeds error back to LLM for a rewrite. On empty result → runs diagnostics + rewrites with relaxed filters | Handles hallucinated joins & jargon transparently |
 
 **The result:** a rep can ask "show me my top rheumatologists," get a clarifying prompt ("by NRx or visits?"), follow up with "why is Dr. Smith so high?" — and the system handles all of it without re-querying the DB or confusing one rep's session with another's.
 
