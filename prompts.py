@@ -48,6 +48,14 @@ SQL RULES (DuckDB dialect):
 - Simpler SQL is always better — avoid unnecessary subqueries
 - Never invent column names not in the schema above
 - Never use semicolons
+
+ACCOUNT NAME RESOLUTION (critical — account names are NOT unique):
+- Multiple account_ids can share the same name (e.g. "Pacific Clinic" exists in territories 1, 2, and 3).
+- When prior results contain an [ACCOUNT DISAMBIGUATION] note, you MUST filter with
+  account_id IN (...) exactly as specified — NEVER filter by name string alone.
+- Do NOT write: WHERE account_name = 'Pacific Clinic'  ← unreliable, picks one arbitrarily.
+- Instead use:  WHERE account_id IN (1002, 1004, 1010, ...)  ← as given in the note.
+- This ensures every result covers all matching accounts, not just whichever one the DB returns first.
 """
 
 # ─────────────────────────────────────────────────────────────────────────────

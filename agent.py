@@ -44,6 +44,10 @@ _conn = None
 # Full SQL context (profile + glossary + DESCRIBE). Used only for SQL steps — not for planner.
 _sql_context = ""
 
+# Cache of distinct account names loaded once from account_dim.
+# Reset whenever init() is called with a new connection.
+_account_names_cache: Optional[list] = None
+
 # Last-turn cache per browser/session id so concurrent users never share context.
 _LAST_TURN_MAX = 512
 _last_turn_by_session: "OrderedDict[str, dict]" = OrderedDict()
@@ -67,6 +71,74 @@ _AMBIGUOUS_PATTERNS = [
     re.compile(r'\bwhich\s+(hcps?|reps?|accounts?)\s+(are|have)\s+(the\s+)?(best|worst|top|highest|lowest)\b', re.I),
 ]
 
+
+# ── Account name disambiguation helpers ──────────────────────────────────────
+
+def _get_account_names() -> list:
+    """Return distinct account names from account_dim, loaded once per connection."""
+    global _account_names_cache
+    if _account_names_cache is None and _conn is not None:
+        rows = _conn.execute(
+            "SELECT DISTINCT name FROM account_dim ORDER BY name"
+        ).fetchall()
+        _account_names_cache = [r[0] for r in rows]
+    return _account_names_cache or []
+
+
+def _detect_account_name(question: str) -> Optional[str]:
+    """
+    Return the first known account name found in the question (case-insensitive).
+    Sorts by descending length so 'Bay Medical Center' matches before 'Bay Clinic'.
+    Returns None if no known account name appears in the question.
+    """
+    q_lower = question.lower()
+    for name in sorted(_get_account_names(), key=len, reverse=True):
+        if name.lower() in q_lower:
+            return name
+    return None
+
+
+def _resolve_account_ambiguity(name: str) -> Optional[dict]:
+    """
+    Given an account name, check how many distinct account_ids share it.
+    Returns None when count == 1 (no ambiguity).
+    Returns a dict when count > 1:
+      {
+        "name":     str,
+        "count":    int,
+        "accounts": [{"account_id", "name", "account_type", "address", "territory_id"}, ...]
+      }
+    """
+    if _conn is None:
+        return None
+    rows = _conn.execute(
+        """
+        SELECT account_id, name, account_type, address, territory_id
+        FROM account_dim
+        WHERE LOWER(name) = LOWER(?)
+        ORDER BY territory_id, account_id
+        """,
+        [name],
+    ).fetchall()
+    if len(rows) <= 1:
+        return None
+    return {
+        "name": name,
+        "count": len(rows),
+        "accounts": [
+            {
+                "account_id": r[0],
+                "name": r[1],
+                "account_type": r[2],
+                "address": r[3],
+                "territory_id": r[4],
+            }
+            for r in rows
+        ],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _session_scope(session_id: Optional[str]) -> str:
     s = (session_id or "").strip()
@@ -128,9 +200,10 @@ def _looks_like_reuse_intent(question: str) -> bool:
 
 
 def init(conn, schema: str) -> None:
-    global _conn, _sql_context
+    global _conn, _sql_context, _account_names_cache
     _conn = conn
     _sql_context = schema
+    _account_names_cache = None  # invalidate so helpers re-load from the new connection
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -444,6 +517,36 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> dict:
     interpretation = ambiguity["interpretation"] if ambiguity["is_ambiguous"] else ""
     alternatives = ambiguity["alternatives"] if ambiguity["is_ambiguous"] else []
 
+    # ── Step 0d: Account name disambiguation ─────────────────────────────────
+    # account names in account_dim are NOT unique (e.g. "Pacific Clinic" maps to
+    # 6 different account_ids). We detect any known account name in the question,
+    # count matching IDs, and — when there are multiple — build two things:
+    #   account_ctx   → injected into prior_results for the SQL LLM so it always
+    #                    uses account_id IN (...) instead of a bare name filter.
+    #   account_warning → shown to the user explaining that results are combined.
+    account_ctx = ""
+    account_warning = None
+    _matched_acct_name = _detect_account_name(resolved)
+    if _matched_acct_name:
+        _acct_amb = _resolve_account_ambiguity(_matched_acct_name)
+        if _acct_amb:
+            _ids = [str(a["account_id"]) for a in _acct_amb["accounts"]]
+            _disambig_lines = "\n".join(
+                f"  • ID {a['account_id']} — {a['account_type']}, {a['address']}, Territory {a['territory_id']}"
+                for a in _acct_amb["accounts"]
+            )
+            account_warning = (
+                f"'{_matched_acct_name}' matches {_acct_amb['count']} different accounts. "
+                f"Results are combined across all of them:\n{_disambig_lines}"
+            )
+            account_ctx = (
+                f"[ACCOUNT DISAMBIGUATION] '{_matched_acct_name}' maps to "
+                f"{_acct_amb['count']} account_ids: {', '.join(_ids)}. "
+                f"In your SQL use: account_id IN ({', '.join(_ids)}) — never filter by name string alone. "
+                f"Label any aggregated output as "
+                f"'combined across {_acct_amb['count']} accounts named \"{_matched_acct_name}\"'."
+            )
+
     # ── Cache check ───────────────────────────────────────────────────────────
     cache_key = _answer_cache_key(resolved, history, scope)
     cached = _answer_cache_get(cache_key)
@@ -458,11 +561,12 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> dict:
                 "results_text": results_text,
             },
         )
-        # Return cached answer; alternatives still shown (computed above)
+        # Return cached answer; alternatives + account warning still shown
         return _make_result(
             answer,
             interpretation=interpretation or resolved,
             alternatives=alternatives,
+            warning=account_warning,
         )
 
     # ── Step 1: Planner ───────────────────────────────────────────────────────
@@ -511,7 +615,13 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> dict:
 
     for i, sub_q in enumerate(sub_questions):
         step_key = f"step_{i + 1}"
-        step_data = _sql_step_result(sql_system, sub_q, format_results(results))
+        # Prepend the account disambiguation note to prior_results for step 1 only.
+        # Later steps already see the concrete account_ids in the step_1 result rows,
+        # so they don't need the note repeated.
+        prior = format_results(results)
+        if i == 0 and account_ctx:
+            prior = account_ctx + "\n\n" + prior
+        step_data = _sql_step_result(sql_system, sub_q, prior)
 
         results[step_key] = step_data["result"]
         if step_data.get("sql"):
@@ -524,18 +634,28 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> dict:
             empty_diagnostic = step_data["diagnostic"]
 
     # ── Step 4: Synthesize ────────────────────────────────────────────────────
+    # When multiple accounts share the same name, prepend a note to results_summary
+    # so the synthesizer labels the answer "combined across N accounts named X".
+    results_text = format_results(results)
+    synth_results = results_text
+    if account_ctx and _acct_amb:
+        synth_results = (
+            f"[Note: the following results are combined across {_acct_amb['count']} accounts "
+            f"all named '{_matched_acct_name}'. Mention this in your answer.]\n\n"
+            + results_text
+        )
+
     answer = llm_call(
         system=SYNTHESIZER_SYSTEM,
         user=SYNTHESIZER_PROMPT.format(
             original_question=resolved,
-            results_summary=format_results(results),
+            results_summary=synth_results,
             history=format_history(history),
         ),
         max_tokens=640,
     )
 
     # Cache this turn for potential follow-ups
-    results_text = format_results(results)
     _last_turn_set(
         scope,
         {
@@ -561,4 +681,5 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> dict:
         alternatives=alternatives,
         sql_steps=sql_steps,
         empty_diagnostic=expose_diag,
+        warning=account_warning,
     )
