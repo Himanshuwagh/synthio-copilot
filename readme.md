@@ -46,11 +46,9 @@ Building AI for structured Pharma data presents several unique hurdles.
 
 To move this from a powerful assessment prototype to a true enterprise-grade reporting system querying millions of rows across thousands of territories, we would transition to:
 
-1. **A True Semantic Layer (dbt / Cube.js):**
-   Rather than letting the LLM write raw SQL directly against raw fact tables, it would query pre-defined semantic metrics (e.g., `SELECT * from rep_hcp_monthly_summary`). This hardcodes business logic safely and completely eliminates the risk of bad math.
-2. **Schema RAG (Retrieval-Augmented Generation):**
+1. **Schema RAG (Retrieval-Augmented Generation):**
    When dealing with an enterprise warehouse of 500+ tables, feeding the whole schema to the LLM's context window wastes tokens and degrades accuracy. We would use a Vector Search to retrieve *only* the relevant table definitions (DDLs) specific to the user's question before generating the query.
-3. **Row-Level Security (RLS) & Compliance:**
+2. **Row-Level Security (RLS) & Compliance:**
    Production reps must never see another territory's prescriptions. Security filters would be aggressively clamped at the API or Database layer by automatically appending a hardcoded `WHERE territory_id = X` to every executed LLM query, keeping data strictly walled off.
 
 ### Sample Queries
