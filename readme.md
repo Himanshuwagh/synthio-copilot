@@ -52,3 +52,12 @@ To move this from a powerful assessment prototype to a true enterprise-grade rep
    When dealing with an enterprise warehouse of 500+ tables, feeding the whole schema to the LLM's context window wastes tokens and degrades accuracy. We would use a Vector Search to retrieve *only* the relevant table definitions (DDLs) specific to the user's question before generating the query.
 3. **Row-Level Security (RLS) & Compliance:**
    Production reps must never see another territory's prescriptions. Security filters would be aggressively clamped at the API or Database layer by automatically appending a hardcoded `WHERE territory_id = X` to every executed LLM query, keeping data strictly walled off.
+
+### Sample Queries
+
+1. How many completed, cancelled, and scheduled meetings does each rep have in total?
+2. Who are top HCPs for rep 1?
+3. Which under-visited HCPs have the lowest market share in Territory 2?
+4. What is the payor mix for Pacific Clinic?
+5. `First ask`: "What is the NRx trend for the top prescriber in Territory 1 over the last 6 months?" 
+   `Then ask`: "What about Territory 3?"
