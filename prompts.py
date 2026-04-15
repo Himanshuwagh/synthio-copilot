@@ -88,10 +88,29 @@ INTENT_PROMPT = """History:
 
 Latest: "{question}"
 
-NEW_DATA = needs different data (new filter, dimension, time range, comparison, new topic).
-REUSE_DATA = same data, different presentation (elaborate, explain, summarize, why, tell me more).
+NEW_DATA = the user needs data that is NOT already in the previous answer.
+  This includes: new entity, new filter, new time range, new comparison, new topic,
+  AND any request for a different level of detail or grouping not shown before
+  (e.g. per-account, per-rep, individual rows, breakdown by X, finer granularity).
 
-Examples: "what about rep 2?" NEW_DATA | "elaborate" REUSE_DATA | "break down by month" NEW_DATA | "why?" REUSE_DATA
+REUSE_DATA = the user only wants a different wording/presentation of the EXACT data already shown.
+  This includes: elaborate, explain, summarize, shorten, tell me more, why.
+
+CRITICAL RULE: If the previous answer shows aggregated/combined data and the user asks for
+  individual rows, a per-entity breakdown, or any granularity not present in that answer → NEW_DATA.
+
+Examples:
+  "what about rep 2?" → NEW_DATA
+  "elaborate" → REUSE_DATA
+  "break down by month" → NEW_DATA
+  "why?" → REUSE_DATA
+  "show me individual accounts" → NEW_DATA
+  "can you return with individual accounts" → NEW_DATA
+  "per account breakdown" → NEW_DATA
+  "split by territory" → NEW_DATA
+  "tell me more" → REUSE_DATA
+  "what does that mean?" → REUSE_DATA
+  "give me the details for each one" → NEW_DATA
 
 Output ONLY: NEW_DATA or REUSE_DATA"""
 

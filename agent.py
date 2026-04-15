@@ -395,6 +395,30 @@ def _handle_followup(
     )
 
 
+# Patterns that indicate the follow-up synthesizer could NOT answer from cached data.
+# When any of these fire the request must be escalated to the full SQL pipeline.
+_CACHE_INSUFFICIENT_RE = re.compile(
+    r"parser.?error"                          # synthesizer hallucinated a query error
+    r"|could not retrieve"                    # explicit inability to get data
+    r"|not (?:in|part of) (?:the )?(?:cached|previous|available|prior) (?:data|results|answer|response)"
+    r"|previous (?:response|answer|data) (?:only|provided combined|had only|showed only)"
+    r"|individual account.{0,50}not (?:in|available|included|shown)"
+    r"|don't have (?:the )?(?:individual|per.account|detailed|breakdown)",
+    re.I | re.DOTALL,
+)
+
+
+def _followup_answered_from_cache(answer: str) -> bool:
+    """
+    Return True when the follow-up synthesizer produced a real answer from cached data.
+    Return False when it signals that the cached data is insufficient — which means
+    the caller must escalate to a full NEW_DATA SQL run.
+    """
+    if not answer or answer.startswith("[LLM error"):
+        return False
+    return not bool(_CACHE_INSUFFICIENT_RE.search(answer))
+
+
 def _extract_json(text: str) -> dict:
     """Extract the first JSON object from an LLM response (handles markdown fences)."""
     text = text.strip()
@@ -501,16 +525,21 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> dict:
     # ── Fast path: pure elaboration/explanation on same data ─────────────────
     if intent == "REUSE_DATA" and last_turn:
         answer = _handle_followup(question, resolved, history, last_turn)
-        _last_turn_set(
-            scope,
-            {
-                "question": question,
-                "resolved": resolved,
-                "answer": answer,
-                "results_text": last_turn.get("results_text", ""),
-            },
-        )
-        return _make_result(answer, interpretation=resolved)
+        # Safety net: if the synthesizer signals the cached data is insufficient
+        # (e.g. it doesn't have a per-account breakdown that the user just asked for),
+        # fall through to the full SQL pipeline instead of returning a bad answer.
+        if _followup_answered_from_cache(answer):
+            _last_turn_set(
+                scope,
+                {
+                    "question": question,
+                    "resolved": resolved,
+                    "answer": answer,
+                    "results_text": last_turn.get("results_text", ""),
+                },
+            )
+            return _make_result(answer, interpretation=resolved)
+        # Cache was insufficient — continue below as NEW_DATA
 
     # ── Step 0c: Ambiguity detection (only for new data queries) ─────────────
     ambiguity = _check_ambiguity(resolved)
