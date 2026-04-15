@@ -594,6 +594,33 @@
       border: 1px solid #fecdd3;
       color: #9f1239;
     }
+
+    /* Account / data warning banner */
+    .warning-banner {
+      font-family: var(--font-ui);
+      font-size: 12px;
+      color: #92400e;
+      background: #fffbeb;
+      border-left: 3px solid #f59e0b;
+      border-radius: 0 6px 6px 0;
+      padding: 6px 10px;
+      margin-bottom: 10px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+    .warning-banner strong { font-weight: 600; }
+
+    /* Streaming cursor blink */
+    .stream-cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1em;
+      background: var(--text-muted);
+      margin-left: 2px;
+      vertical-align: text-bottom;
+      animation: blink 0.9s step-start infinite;
+    }
+    @keyframes blink { 50% { opacity: 0; } }
   </style>
 </head>
 <body>
@@ -878,25 +905,26 @@
     return row;
   }
 
-  // ── Render a structured agent response (product-instinct UI) ──────────────
+  // ── Build structured content into an existing bubble element ────────────
   //
   //  Layout inside the AI bubble:
+  //   0. [Warning banner]          — account disambiguation or data caveats
   //   1. [Interpretation banner]   — "I interpreted this as: …"
   //   2. [Main answer]             — markdown prose
   //   3. [Alternative chips]       — "Also explore: [By NRx growth] [By tier] …"
-  //   4. [▶ View SQL & data]        — collapsible SQL panel (Instinct 2)
-  //   5. [No data diagnostic]      — amber box with diagnostic detail (Instinct 3)
+  //   4. [▶ View SQL & data]       — collapsible SQL panel
+  //   5. [No data diagnostic]      — amber box with diagnostic detail
   //
-  function renderStructuredMessage(data, originalQuestion) {
-    const row = document.createElement('div');
-    row.className = 'msg-row ai';
-
-    const bubble = document.createElement('div');
-    bubble.className = 'msg-bubble';
+  function _buildStructuredBubble(bubble, data, originalQuestion) {
+    // ── 0. Warning banner (account disambiguation etc.) ───────────────────
+    if (data.warning) {
+      const warn = document.createElement('div');
+      warn.className = 'warning-banner';
+      warn.innerHTML = '<strong>Note:</strong> ' + escapeHtml(data.warning);
+      bubble.appendChild(warn);
+    }
 
     // ── 1. Interpretation banner ──────────────────────────────────────────
-    // Show when the system resolved/rewrote the question OR when it chose
-    // a specific interpretation from an ambiguous question.
     const interp = (data.interpretation || '').trim();
     const origLower = (originalQuestion || '').trim().toLowerCase();
     const showBanner = interp && interp.toLowerCase() !== origLower;
@@ -922,12 +950,10 @@
     if (alts.length > 0) {
       const section = document.createElement('div');
       section.className = 'alt-section';
-
       const label = document.createElement('div');
       label.className = 'alt-label';
       label.textContent = 'Also explore:';
       section.appendChild(label);
-
       const chips = document.createElement('div');
       chips.className = 'alt-chips';
       alts.forEach(alt => {
@@ -957,34 +983,27 @@
         'stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">' +
         '<polyline points="9 18 15 12 9 6"/></svg>' +
         '<span>View SQL &amp; data sources</span>';
-
       const panel = document.createElement('div');
       panel.className = 'sql-panel';
-
       steps.forEach((step, idx) => {
         const stepDiv = document.createElement('div');
         stepDiv.className = 'sql-step';
-
         const lbl = document.createElement('div');
         lbl.className = 'sql-step-label';
         lbl.textContent = steps.length > 1
           ? 'Step ' + (idx + 1) + (step.question ? ': ' + step.question : '')
           : 'SQL query';
         stepDiv.appendChild(lbl);
-
         const code = document.createElement('div');
         code.className = 'sql-code';
         code.textContent = step.sql;
         stepDiv.appendChild(code);
-
         panel.appendChild(stepDiv);
       });
-
       toggle.addEventListener('click', () => {
         const isOpen = panel.classList.toggle('open');
         toggle.classList.toggle('open', isOpen);
       });
-
       bubble.appendChild(toggle);
       bubble.appendChild(panel);
     }
@@ -993,25 +1012,29 @@
     if (data.empty_diagnostic) {
       const diagBox = document.createElement('div');
       diagBox.className = 'empty-diagnostic';
-
       const title = document.createElement('div');
       title.className = 'empty-diagnostic-title';
       title.textContent = 'No matching data found';
       diagBox.appendChild(title);
-
       const desc = document.createElement('div');
       desc.className = 'empty-diagnostic-desc';
       desc.textContent =
         'This could mean the filter is too narrow or the data doesn\'t cover this period.';
       diagBox.appendChild(desc);
-
       const pre = document.createElement('pre');
       pre.textContent = data.empty_diagnostic;
       diagBox.appendChild(pre);
-
       bubble.appendChild(diagBox);
     }
+  }
 
+  // ── Create a new AI row + bubble and render structured content into it ──
+  function renderStructuredMessage(data, originalQuestion) {
+    const row = document.createElement('div');
+    row.className = 'msg-row ai';
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    _buildStructuredBubble(bubble, data, originalQuestion);
     row.appendChild(bubble);
     chatAreaEl.appendChild(row);
     scrollBottom();
@@ -1042,7 +1065,7 @@
     if (el) el.remove();
   }
 
-  // ── Send message ──────────────────────────────────
+  // ── Send message (SSE streaming) ─────────────────
   async function sendMessage(text) {
     text = text.trim();
     if (!text || state.loading) return;
@@ -1061,25 +1084,72 @@
     const timeoutMs = 12 * 60 * 1000;
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
 
+    // Streaming bubble — created on first token, replaced with full render on done
+    let streamRow    = null;
+    let streamBubble = null;
+    let streamText   = '';    // accumulated plain text while streaming
+    let cursor       = null;  // blinking cursor element
+    let finalData    = null;
+
+    function ensureStreamBubble() {
+      if (streamRow) return;
+      hideThinking();
+      streamRow    = document.createElement('div');
+      streamRow.className = 'msg-row ai';
+      streamBubble = document.createElement('div');
+      streamBubble.className = 'msg-bubble';
+      cursor = document.createElement('span');
+      cursor.className = 'stream-cursor';
+      streamBubble.appendChild(cursor);
+      streamRow.appendChild(streamBubble);
+      chatAreaEl.appendChild(streamRow);
+    }
+
+    function appendToken(token) {
+      ensureStreamBubble();
+      streamText += token;
+      // Render as plain text while streaming (safe + fast).
+      // Remove cursor, set text, re-append cursor.
+      if (cursor && cursor.parentNode === streamBubble) {
+        streamBubble.removeChild(cursor);
+      }
+      streamBubble.textContent = streamText;
+      streamBubble.appendChild(cursor);
+      scrollBottom();
+    }
+
+    function finaliseStreamBubble(data) {
+      // Replace plain-text stream with fully rendered structured response
+      if (streamBubble) {
+        streamBubble.innerHTML = '';
+        _buildStructuredBubble(streamBubble, data, text);
+      } else {
+        // No tokens arrived (cache hit or REUSE_DATA) — render a fresh bubble
+        renderStructuredMessage(data, text);
+      }
+      scrollBottom();
+    }
+
     try {
-      const res = await fetch('/chat', {
+      const res = await fetch('/chat/stream', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
-          message: text,
-          history: state.history,
+          message:    text,
+          history:    state.history,
           session_id: getSessionId(),
         }),
-        signal:  ctrl.signal,
+        signal: ctrl.signal,
       });
 
       if (!res.ok) {
         let detail = res.statusText;
         try {
           const errBody = await res.json();
-          if (errBody.detail) detail = typeof errBody.detail === 'string' ? errBody.detail : JSON.stringify(errBody.detail);
-        } catch (e) { /* ignore */ }
-        // Instinct 4: human-friendly server error, not a raw status code
+          if (errBody.detail) detail = typeof errBody.detail === 'string'
+            ? errBody.detail
+            : JSON.stringify(errBody.detail);
+        } catch (_) { /* ignore */ }
         throw new Error(
           res.status >= 500
             ? "I couldn't compute this — the server encountered an error. Try rephrasing or asking about a specific time period."
@@ -1087,47 +1157,100 @@
         );
       }
 
-      const data = await res.json();
-      // Support both legacy {answer: string} and new structured response
-      const answer = typeof data.answer === 'string' ? data.answer : null;
-      if (answer == null) throw new Error('Server returned no answer');
+      // ── SSE reader loop ─────────────────────────────────────────────────
+      const reader  = res.body.getReader();
+      const decoder = new TextDecoder();
+      let   buf     = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (rid !== state.requestId) { reader.cancel(); break; }
+
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n');
+        buf = lines.pop(); // keep any partial line for the next chunk
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let evt;
+          try { evt = JSON.parse(line.slice(6)); } catch (_) { continue; }
+
+          if (evt.type === 'status') {
+            // Update the text inside the thinking indicator
+            const thinkRow = document.getElementById('thinking-row');
+            if (thinkRow) {
+              const span = thinkRow.querySelector('span:last-child');
+              if (span) span.textContent = evt.message;
+            }
+
+          } else if (evt.type === 'token') {
+            appendToken(evt.text);
+
+          } else if (evt.type === 'done') {
+            finalData = evt;
+
+          } else if (evt.type === 'error') {
+            throw new Error(evt.message);
+          }
+        }
+      }
 
       if (rid !== state.requestId) return;
 
       hideThinking();
-      // Use structured rendering when metadata is present, plain for simple ack replies
-      if (data.sql_steps || data.alternatives || data.interpretation || data.empty_diagnostic) {
-        renderStructuredMessage(data, text);
-      } else {
-        appendMessage('ai', answer);
+
+      if (finalData) {
+        finaliseStreamBubble(finalData);
+        const answer = finalData.answer || '';
+        state.history.push({ role: 'user',      message: text   });
+        state.history.push({ role: 'assistant', message: answer });
+        if (state.history.length > 20) state.history = state.history.slice(-20);
+      } else if (streamText) {
+        // Stream ended without a done event — show what we got
+        if (streamBubble) {
+          streamBubble.innerHTML = '';
+          const d = document.createElement('div');
+          try { d.innerHTML = marked.parse(streamText); } catch (_) { d.textContent = streamText; }
+          streamBubble.appendChild(d);
+        }
       }
 
-      state.history.push({ role: 'user',      message: text   });
-      state.history.push({ role: 'assistant', message: answer });
-      if (state.history.length > 20) state.history = state.history.slice(-20);
       upsertRecentAfterSend(text);
 
     } catch (err) {
       if (rid !== state.requestId) return;
-
       hideThinking();
-      let msg;
-      if (err.name === 'AbortError') {
-        msg = state.userStopped
-          ? 'Generation stopped.'
-          : `Request timed out after ${timeoutMs / 60000} minutes. The model may be slow — try again or restart Ollama.`;
+
+      if (err.name === 'AbortError' && state.userStopped) {
+        // User clicked Stop — show partial content with a stopped indicator
+        if (streamBubble && streamText) {
+          if (cursor && cursor.parentNode === streamBubble) streamBubble.removeChild(cursor);
+          const stopSpan = document.createElement('span');
+          stopSpan.style.cssText = 'display:block;margin-top:8px;color:#aaa;font-size:12px;font-family:var(--font-ui)';
+          stopSpan.textContent = '— stopped —';
+          streamBubble.appendChild(stopSpan);
+          // Push whatever streamed so far to history
+          state.history.push({ role: 'user',      message: text       });
+          state.history.push({ role: 'assistant', message: streamText });
+        } else {
+          hideThinking();
+          appendMessage('ai', 'Generation stopped.');
+        }
       } else {
-        msg = err.message;
+        // Timeout or server error
+        const msg = err.name === 'AbortError'
+          ? `Request timed out after ${timeoutMs / 60000} minutes. The model may be slow — try again or restart Ollama.`
+          : err.message;
+        const errRow    = document.createElement('div');
+        errRow.className = 'msg-row ai';
+        const errBubble = document.createElement('div');
+        errBubble.className = 'msg-bubble error-bubble';
+        errBubble.textContent = msg;
+        errRow.appendChild(errBubble);
+        chatAreaEl.appendChild(errRow);
+        scrollBottom();
       }
-      // Instinct 4: render errors in a visually distinct bubble, not inline ⚠️ text
-      const errRow = document.createElement('div');
-      errRow.className = 'msg-row ai';
-      const errBubble = document.createElement('div');
-      errBubble.className = 'msg-bubble error-bubble';
-      errBubble.textContent = msg;
-      errRow.appendChild(errBubble);
-      chatAreaEl.appendChild(errRow);
-      scrollBottom();
     } finally {
       clearTimeout(timer);
       if (state.abortCtrl === ctrl) state.abortCtrl = null;

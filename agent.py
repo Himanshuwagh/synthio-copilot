@@ -16,11 +16,12 @@
 # The "answer" key is always a plain string; the rest provides product-instinct
 # metadata consumed by the UI (interpretation, alternatives, sql_steps, etc.).
 
+import asyncio
 import hashlib
 import json
 import re
 from collections import OrderedDict
-from typing import Optional, Tuple
+from typing import AsyncGenerator, Optional, Tuple
 
 from prompts import (
     PLANNER_SYSTEM,
@@ -37,7 +38,7 @@ from prompts import (
     SYNTHESIZER_PROMPT,
     AMBIGUITY_PROMPT,
 )
-from llm_client import chat as _llm_chat
+from llm_client import chat as _llm_chat, stream_chat as _llm_stream
 from db import gather_empty_sql_diagnostics
 
 _conn = None
@@ -712,3 +713,242 @@ def run(question: str, history: list, session_id: Optional[str] = None) -> dict:
         empty_diagnostic=expose_diag,
         warning=account_warning,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+async def run_stream(
+    question: str, history: list, session_id: Optional[str] = None
+) -> AsyncGenerator[dict, None]:
+    """
+    Streaming version of run(). Yields dicts that map to SSE events:
+
+      {"type": "status", "message": str}       — pipeline progress update
+      {"type": "token",  "text":    str}       — one synthesizer token
+      {"type": "done",   ...run() keys...}     — final metadata (always last)
+      {"type": "error",  "message": str}       — fatal error (terminates stream)
+
+    Design notes
+    ────────────
+    • All pre-SQL LLM calls (rewriter, intent, planner, SQL gen) are blocking
+      and run on the event-loop thread — same as the existing /chat endpoint.
+      The event loop is briefly blocked per step, but each `yield` between steps
+      returns control so the SSE chunk is flushed to the client before the next
+      blocking call starts.  For this single-user demo scenario this is fine.
+    • DuckDB must stay on the thread that created the connection (startup thread
+      = event-loop thread).  We never move it to an executor.
+    • Only the final synthesizer uses _llm_stream (true async streaming).
+    """
+    if _conn is None:
+        yield {"type": "error", "message": "[Agent error: database is not initialized]"}
+        return
+
+    scope = _session_scope(session_id)
+    last_turn = _last_turn_get(scope)
+
+    qstrip = question.strip()
+    if history and _ACK_RE.match(qstrip):
+        yield {"type": "done",
+               **_make_result("You're welcome! Ask if you need anything else about the sales data.")}
+        return
+
+    sql_system = SQL_SYSTEM_PROMPT.format(schema=_sql_context)
+
+    # ── Step 0a: rewrite ──────────────────────────────────────────────────────
+    yield {"type": "status", "message": "Analyzing question…"}
+    resolved = _rewrite_question(question, history)
+
+    # ── Step 0b: classify intent ──────────────────────────────────────────────
+    if last_turn and _looks_like_reuse_intent(question):
+        intent = "REUSE_DATA"
+    else:
+        intent = _classify_intent(question, history, last_turn)
+
+    # ── Fast path: REUSE_DATA ─────────────────────────────────────────────────
+    if intent == "REUSE_DATA" and last_turn:
+        yield {"type": "status", "message": "Drafting answer from previous results…"}
+        followup_answer = _handle_followup(question, resolved, history, last_turn)
+        if _followup_answered_from_cache(followup_answer):
+            _last_turn_set(scope, {
+                "question": question,
+                "resolved": resolved,
+                "answer": followup_answer,
+                "results_text": last_turn.get("results_text", ""),
+            })
+            yield {"type": "done", **_make_result(followup_answer, interpretation=resolved)}
+            return
+        # Cache was insufficient — fall through to NEW_DATA path
+
+    # ── Step 0c: ambiguity detection ──────────────────────────────────────────
+    yield {"type": "status", "message": "Checking query…"}
+    ambiguity = _check_ambiguity(resolved)
+    interpretation = ambiguity["interpretation"] if ambiguity["is_ambiguous"] else ""
+    alternatives = ambiguity["alternatives"] if ambiguity["is_ambiguous"] else []
+
+    # ── Step 0d: account name disambiguation ──────────────────────────────────
+    account_ctx = ""
+    account_warning = None
+    _matched_acct_name: Optional[str] = None
+    _acct_amb: Optional[dict] = None
+
+    _matched_acct_name = _detect_account_name(resolved)
+    if _matched_acct_name:
+        _acct_amb = _resolve_account_ambiguity(_matched_acct_name)
+        if _acct_amb:
+            _ids = [str(a["account_id"]) for a in _acct_amb["accounts"]]
+            _disambig_lines = "\n".join(
+                f"  • ID {a['account_id']} — {a['account_type']}, {a['address']}, Territory {a['territory_id']}"
+                for a in _acct_amb["accounts"]
+            )
+            account_warning = (
+                f"'{_matched_acct_name}' matches {_acct_amb['count']} different accounts. "
+                f"Results are combined across all of them:\n{_disambig_lines}"
+            )
+            account_ctx = (
+                f"[ACCOUNT DISAMBIGUATION] '{_matched_acct_name}' maps to "
+                f"{_acct_amb['count']} account_ids: {', '.join(_ids)}. "
+                f"In your SQL use: account_id IN ({', '.join(_ids)}) — never filter by name string alone. "
+                f"Label any aggregated output as "
+                f"'combined across {_acct_amb['count']} accounts named \"{_matched_acct_name}\"'."
+            )
+
+    # ── Cache check ───────────────────────────────────────────────────────────
+    cache_key = _answer_cache_key(resolved, history, scope)
+    cached = _answer_cache_get(cache_key)
+    if cached is not None:
+        answer, results_text = cached
+        _last_turn_set(scope, {
+            "question": question,
+            "resolved": resolved,
+            "answer": answer,
+            "results_text": results_text,
+        })
+        yield {"type": "done",
+               **_make_result(answer,
+                              interpretation=interpretation or resolved,
+                              alternatives=alternatives,
+                              warning=account_warning)}
+        return
+
+    # ── Step 1: Planner ───────────────────────────────────────────────────────
+    yield {"type": "status", "message": "Planning query…"}
+    plan = llm_call(
+        system=PLANNER_SYSTEM,
+        user=PLANNER_PROMPT.format(
+            question=resolved,
+            history=format_history(history[-4:]),
+        ),
+        max_tokens=512,
+    )
+
+    if plan.startswith("[LLM error"):
+        try:
+            from config import get_llm_settings
+            prov = get_llm_settings().provider
+        except Exception:
+            prov = "ollama"
+        detail = plan
+        if detail.startswith("[LLM error: ") and detail.endswith("]"):
+            detail = detail[len("[LLM error: "):-1].strip()
+        if prov == "ollama":
+            msg = (
+                "Sorry, I couldn't reach the local LLM. Is Ollama running? "
+                "(`ollama serve`) Also check `model` in config.ini.\n\n"
+                f"Details: {detail}"
+            )
+        else:
+            msg = (
+                "Sorry, the cloud LLM request failed. Check API keys in `.env`, "
+                "`provider` and `model` in `config.ini`, and restart the server after changes.\n\n"
+                f"Details: {detail}"
+            )
+        yield {"type": "done",
+               **_make_result(msg, interpretation=resolved, alternatives=alternatives)}
+        return
+
+    # ── Step 2: Route ─────────────────────────────────────────────────────────
+    if "COMPLEX" in plan.upper():
+        sub_questions = parse_sub_questions(plan)
+    else:
+        sub_questions = [resolved]
+
+    # ── Step 3: SQL Execution Loop ────────────────────────────────────────────
+    results: dict[str, str] = {}
+    sql_steps: list[dict] = []
+    empty_diagnostic: Optional[str] = None
+    total_steps = len(sub_questions)
+
+    for i, sub_q in enumerate(sub_questions):
+        step_key = f"step_{i + 1}"
+        step_label = f" ({i + 1}/{total_steps})" if total_steps > 1 else ""
+        yield {"type": "status", "message": f"Running query{step_label}…"}
+
+        prior = format_results(results)
+        if i == 0 and account_ctx:
+            prior = account_ctx + "\n\n" + prior
+        step_data = _sql_step_result(sql_system, sub_q, prior)
+
+        results[step_key] = step_data["result"]
+        if step_data.get("sql"):
+            sql_steps.append({
+                "step": step_key,
+                "question": sub_q,
+                "sql": step_data["sql"],
+            })
+        if step_data.get("diagnostic") and not empty_diagnostic:
+            empty_diagnostic = step_data["diagnostic"]
+
+    # ── Step 4: Synthesize (streaming) ────────────────────────────────────────
+    results_text = format_results(results)
+    synth_results = results_text
+    if account_ctx and _acct_amb:
+        synth_results = (
+            f"[Note: the following results are combined across {_acct_amb['count']} accounts "
+            f"all named '{_matched_acct_name}'. Mention this in your answer.]\n\n"
+            + results_text
+        )
+
+    synth_prompt = SYNTHESIZER_PROMPT.format(
+        original_question=resolved,
+        results_summary=synth_results,
+        history=format_history(history),
+    )
+
+    yield {"type": "status", "message": "Writing answer…"}
+
+    full_answer = ""
+    async for token in _llm_stream(SYNTHESIZER_SYSTEM, synth_prompt, max_tokens=640):
+        full_answer += token
+        yield {"type": "token", "text": token}
+
+    if not full_answer:
+        full_answer = "[LLM error: no response received]"
+
+    # ── Cache + last-turn update ──────────────────────────────────────────────
+    _last_turn_set(scope, {
+        "question": question,
+        "resolved": resolved,
+        "answer": full_answer,
+        "results_text": results_text,
+    })
+    if not full_answer.startswith("[LLM error"):
+        _answer_cache_set(cache_key, full_answer, results_text)
+
+    expose_diag = empty_diagnostic if (
+        empty_diagnostic
+        and full_answer
+        and ("no data" in full_answer.lower()
+             or "no rows" in full_answer.lower()
+             or "not found" in full_answer.lower())
+    ) else None
+
+    yield {
+        "type": "done",
+        **_make_result(
+            full_answer,
+            interpretation=interpretation or resolved,
+            alternatives=alternatives,
+            sql_steps=sql_steps,
+            empty_diagnostic=expose_diag,
+            warning=account_warning,
+        ),
+    }

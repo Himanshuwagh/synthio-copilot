@@ -2,17 +2,19 @@
 #
 # Startup:  loads all CSVs into DuckDB and initialises the agent.
 # Routes:
-#   GET  /      → serve static/index.html
-#   POST /chat  → run agent pipeline, return JSON {answer}
+#   GET  /            → serve static/index.html
+#   POST /chat        → run agent pipeline, return JSON {answer}
+#   POST /chat/stream → same pipeline, Server-Sent Events (status + token + done)
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 import agent
@@ -110,3 +112,56 @@ async def chat_endpoint(req: ChatRequest) -> JSONResponse:
     # Return the full structured result so the UI can render interpretation,
     # alternative chips, collapsible SQL, and empty-result diagnostics.
     return JSONResponse(result)
+
+
+@app.post("/chat/stream")
+async def chat_stream_endpoint(req: ChatRequest) -> StreamingResponse:
+    """
+    Server-Sent Events endpoint.  Emits newline-delimited `data: <json>` lines:
+      {"type": "status", "message": "..."}   — pipeline progress
+      {"type": "token",  "text":    "..."}   — one synthesizer token
+      {"type": "done",   ...result keys...}  — final metadata (always last)
+      {"type": "error",  "message": "..."}   — fatal error
+
+    The frontend reads this with fetch() + ReadableStream so it can show live
+    status updates and stream the answer token-by-token.
+    """
+    if not req.message.strip():
+        raise HTTPException(status_code=400, detail="message cannot be empty")
+
+    supabase_on = get_supabase_settings() is not None
+    sid = (req.session_id or "").strip()
+    if supabase_on:
+        if not sid:
+            raise HTTPException(
+                status_code=400,
+                detail="session_id is required when Supabase is configured",
+            )
+        history = load_history(last_n=10, session_id=sid)
+    else:
+        history = req.history
+
+    async def event_generator():
+        final_answer = ""
+        try:
+            async for chunk in agent.run_stream(
+                req.message, history, session_id=sid or None
+            ):
+                if chunk.get("type") == "done":
+                    final_answer = chunk.get("answer", "")
+                yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        finally:
+            # Save the turn to Supabase (or no-op when Supabase is off)
+            save_turn(req.message, final_answer, session_id=sid if supabase_on else None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # tell nginx/proxies not to buffer SSE
+            "Connection": "keep-alive",
+        },
+    )
